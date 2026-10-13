@@ -11,11 +11,9 @@ reference labels, not real-world production accuracy.
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="PilotProof | AI Pilot Evaluation Studio", page_icon="🧪", layout="wide")
+from evaluation import CATEGORIES, agreement_percentage, clean_and_validate, read_csv_input
 
-CATEGORIES = [
-    "ORDER_STATUS", "RETURNS_REFUNDS", "PRODUCT_INFO", "TECH_SUPPORT", "HUMAN_REVIEW"
-]
+st.set_page_config(page_title="PilotProof | AI Pilot Evaluation Studio", page_icon="🧪", layout="wide")
 
 # Demo evidence is embedded to make the public example usable without uploads.
 # Entries were copied from the 30-case synthetic challenge dataset,
@@ -285,54 +283,6 @@ DEMO_ROWS = [{'enquiry_id': '101',
   'predicted_label': 'HUMAN_REVIEW'}]
 
 
-def clean_and_validate(enquiries, labels, predictions):
-    """Return a matched result table; reject invalid or mismatched CSV inputs."""
-    requirements = (
-        (enquiries, ["enquiry_id", "enquiry"], "Customer enquiries"),
-        (labels, ["enquiry_id", "expected_label", "risk_level", "clarity", "label_reason"], "Reference labels"),
-        (predictions, ["enquiry_id", "prompt_version", "predicted_label"], "AI predictions"),
-    )
-    cleaned = []
-    for frame, required, name in requirements:
-        missing = [col for col in required if col not in frame.columns]
-        if missing:
-            raise ValueError(f"{name}: missing columns: {', '.join(missing)}")
-        if frame.empty:
-            raise ValueError(f"{name}: file is empty")
-        frame = frame[required].copy()
-        for col in required:
-            if frame[col].isna().any():
-                raise ValueError(f"{name}: missing values in '{col}'")
-            frame[col] = frame[col].astype(str).str.strip()
-            if frame[col].eq("").any():
-                raise ValueError(f"{name}: blank values in '{col}'")
-        if frame["enquiry_id"].duplicated().any():
-            raise ValueError(f"{name}: enquiry IDs must be unique")
-        cleaned.append(frame)
-
-    e, l, p = cleaned
-    if not l["expected_label"].isin(CATEGORIES).all():
-        raise ValueError("Reference labels include an unknown category")
-    if not p["predicted_label"].isin(CATEGORIES).all():
-        raise ValueError("AI predictions include an unknown category")
-    if not l["risk_level"].isin(["high", "routine"]).all():
-        raise ValueError("Reference labels: risk_level must be 'high' or 'routine'")
-    if not l["clarity"].isin(["mixed", "clear"]).all():
-        raise ValueError("Reference labels: clarity must be 'mixed' or 'clear'")
-    if p["prompt_version"].nunique() != 1:
-        raise ValueError("Upload predictions from only one prompt version")
-    e_ids, l_ids, p_ids = [set(frame["enquiry_id"]) for frame in (e, l, p)]
-    if e_ids != l_ids or e_ids != p_ids:
-        raise ValueError("Enquiry IDs do not match across all three files. Use files from the same experiment.")
-
-    result = (e.merge(l, on="enquiry_id", validate="one_to_one")
-                .merge(p, on="enquiry_id", validate="one_to_one"))
-    result["correct"] = result["expected_label"].eq(result["predicted_label"])
-    result["escalation_miss"] = (
-        result["risk_level"].eq("high") & ~result["predicted_label"].eq("HUMAN_REVIEW")
-    )
-    return result
-
 
 def render_evaluation(result, demo_mode):
     total = len(result)
@@ -340,9 +290,17 @@ def render_evaluation(result, demo_mode):
     missed = int(result["escalation_miss"].sum())
     high = int(result["risk_level"].eq("high").sum())
 
+    conflicts = result.loc[result["reference_risk_conflict"], "enquiry_id"]
+    if not conflicts.empty:
+        st.warning(
+            "Reference annotation conflict: high-risk cases have a reference label other "
+            "than HUMAN_REVIEW. Review enquiry IDs: " + ", ".join(conflicts)
+            + ". Original labels and agreement scores are unchanged."
+        )
+
     st.subheader("Evaluation results")
     a, b, c, d = st.columns(4)
-    a.metric("Agreement with references", f"{100 * right / total:.1f}%")
+    a.metric("Agreement with references", f"{agreement_percentage(result):.1f}%")
     b.metric("Matching classifications", f"{right}/{total}")
     c.metric("High-risk cases", high)
     d.metric("High-risk escalation misses", missed)
@@ -369,7 +327,7 @@ def render_evaluation(result, demo_mode):
             filtered = result[~result["correct"]]
         st.dataframe(
             filtered[["enquiry_id", "enquiry", "expected_label", "predicted_label", "risk_level", "clarity", "correct", "label_reason"]],
-            use_container_width=True, hide_index=True
+            width="stretch", hide_index=True
         )
         st.caption("Filtering helps reviewers inspect sensitive or borderline classifications, not just the overall percentage.")
 
@@ -377,14 +335,14 @@ def render_evaluation(result, demo_mode):
         st.markdown("**Confusion matrix** — rows show reference labels, columns show recorded AI predictions.")
         matrix = pd.crosstab(result["expected_label"], result["predicted_label"])
         matrix = matrix.reindex(index=CATEGORIES, columns=CATEGORIES, fill_value=0)
-        st.dataframe(matrix, use_container_width=True)
+        st.dataframe(matrix, width="stretch")
         failures = result[~result["correct"]]
         if failures.empty:
             st.success("No mismatches were detected against these reference labels.")
         else:
             st.markdown("**Cases to investigate**")
             st.dataframe(failures[["enquiry_id", "enquiry", "expected_label", "predicted_label", "risk_level"]],
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
     with tab3:
         st.markdown("""
@@ -436,9 +394,9 @@ else:
             st.error("Please use CSV files smaller than 2 MB for this demonstration.")
             st.stop()
     try:
-        enquiries = pd.read_csv(q1, dtype={"enquiry_id": str})
-        labels = pd.read_csv(q2, dtype={"enquiry_id": str})
-        predictions = pd.read_csv(q3, dtype={"enquiry_id": str})
+        enquiries = read_csv_input(q1)
+        labels = read_csv_input(q2)
+        predictions = read_csv_input(q3)
     except Exception as error:
         st.error(f"Cannot read the CSV file(s): {error}")
         st.stop()
