@@ -1,4 +1,4 @@
-# PilotProof â€” AI Pilot Evaluation Studio
+# PilotProof - AI Pilot Evaluation Studio
 
 **A working Streamlit prototype for evaluating recorded AI-generated customer enquiry classifications before considering operational adoption.**
 
